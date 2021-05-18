@@ -22,6 +22,10 @@ options:
         description:
             - The Artifact ID to pull from Nexus
         required: True
+    repository:
+        description:
+            - The name of the repository on Nexus where to scope all API operations
+        required: True
     operation:
         description:
             - Operation to perform: GET or PUT. Default is 'GET'
@@ -49,6 +53,7 @@ EXAMPLES = r'''
       pass: redhat123
       nexus_endpoint: "https://nexus.domain.tld"
       artifact_id: "org.redhat:demo-app:1.1.0-SNAPSHOT"
+      repository: "maven-snapshots"
       target: "/tmp/demoapp.jar"
 '''
 
@@ -122,15 +127,16 @@ class NexusAdapter():
         self.parm_hash = parameters
         self.base_url = "%s" % (self.parm_hash.nexus_url)
         self.base_search_url = "%s/%s?sort=version" % (self.base_url, NEXUS_REST_PATH)
-        self.base_download_url = "%s/%s/download?sort=version" % (self.base_url, NEXUS_REST_PATH)
         self.md5computer = md5()
         self.sha1computer = sha1()
         self.HASH_BUFFER_SIZE = 64*1024
 
     def build_search_parameters(self):
-        self.url_parameters = "&group=%s&name=%s&maven.extension=%s&maven.classifier" % (self.parm_hash.artifact.groupID,
-                                                                                        self.parm_hash.artifact.ID,
-                                                                                        self.parm_hash.artifact.format)
+        self.url_parameters = "&repository=%s&group=%s&name=%s&version=%s&maven.extension=%s&maven.classifier" % (self.parm_hash.repository,
+                                                                                                        self.parm_hash.artifact.groupID,
+                                                                                                        self.parm_hash.artifact.ID,
+                                                                                                        self.parm_hash.artifact.version,
+                                                                                                        self.parm_hash.artifact.format)
 
     def _compute_hashes(self, filename):
         with open(filename, 'rb') as descriptor:
@@ -183,8 +189,6 @@ class NexusAdapter():
 
                         downloaded_so_far += len(buffer)
                         descriptor.write(buffer)
-                        status = r"%10d  [%3.2f%%]" % (downloaded_so_far, downloaded_so_far * 100. / file_size)
-                        status = status + chr(8)*(len(status)+1)
 
                 md5Hash, sha1Hash = self._compute_hashes(out_file)
 
@@ -205,6 +209,7 @@ def nexus_module():
             username = dict(type='str', required=True),
             password = dict(type='str', required=True, no_log=True),
             target = dict(type='str', required=False, default=None),
+            repository = dict(type='str', required=True),
             nexus_endpoint = dict(type='str', required=True),
             artifact_id = dict(type='str', required=True),
             operation = dict(type='str', required=False, default="GET"),
@@ -220,6 +225,7 @@ def nexus_module():
     password = nexus_module_instance.params.get('password')
     nexus_endpoint = nexus_module_instance.params.get('nexus_endpoint')
     target = nexus_module_instance.params.get('target')
+    repository = nexus_module_instance.params.get('repository')
     artifact_id = nexus_module_instance.params.get('artifact_id')
     operation = nexus_module_instance.params.get('operation')
     source = nexus_module_instance.params.get('source')
@@ -240,6 +246,7 @@ def nexus_module():
     parameter_hash = {
         "username": username,
         "password": password,
+        "repository": repository,
         "nexus_url": nexus_endpoint
     }
 
@@ -284,7 +291,7 @@ def nexus_module():
         # get the artifact
         try:
             nexus_adapter.build_search_parameters()
-            nexus_adapter.pull_artifact()
+            res_args['message'] = nexus_adapter.pull_artifact().get('message')
             res_args['changed'] = True
         except FetchError as fe:
             nexus_module_instance.fail_json(msg=str(fe), **res_args)

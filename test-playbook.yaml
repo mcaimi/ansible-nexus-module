@@ -1,0 +1,31 @@
+- name: Ansible Nexus Module Test Suite
+  hosts: localhost
+  tasks:
+    - name: Try a non-existing artifact from Nexus repo
+      nexus:
+        nexus_endpoint: "http://nexus.apps.kubernetes.local"
+        username: "jenkins-nexus"
+        password: "jenkins"
+        artifact_id: "org.redhat:openshift-demo-application-quarkus-runner:1.1.1-SNAPSHOT"
+        artifact_format: "jar"
+        target: "/tmp/artifact.jar"
+        repository: "maven-releases"
+      ignore_errors: true
+    - name: Download an  artifact from Nexus repo
+      nexus:
+        nexus_endpoint: "http://nexus.apps.kubernetes.local"
+        username: "jenkins-nexus"
+        password: "jenkins"
+        artifact_id: "org.redhat:openshift-demo-application-quarkus-runner:1.1.1-SNAPSHOT.12"
+        artifact_format: "jar"
+        target: "/tmp/artifact.jar"
+        repository: "maven-snapshots"
+    - name: Test an already downloaded artifact
+      nexus:
+        nexus_endpoint: "http://nexus.apps.kubernetes.local"
+        username: "jenkins-nexus"
+        password: "jenkins"
+        artifact_id: "org.redhat:openshift-demo-application-quarkus-runner:1.1.1-SNAPSHOT.12"
+        artifact_format: "jar"
+        target: "/tmp/artifact.jar"
+        repository: "maven-snapshots"
