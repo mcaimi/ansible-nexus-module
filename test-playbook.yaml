@@ -20,6 +20,7 @@
         artifact_format: "jar"
         target: "/tmp/artifact.jar"
         repository: "maven-snapshots"
+      ignore_errors: true
     - name: Test an already downloaded artifact
       nexus:
         nexus_endpoint: "http://nexus.apps.kubernetes.local"
@@ -29,3 +30,16 @@
         artifact_format: "jar"
         target: "/tmp/artifact.jar"
         repository: "maven-snapshots"
+      ignore_errors: true
+    - name: Upload an artifact to nexus
+      nexus:
+        nexus_endpoint: "http://nexus.apps.kubernetes.local"
+        username: "jenkins-nexus"
+        password: "jenkins"
+        artifact_id: "org.redhat:new-application-artifact:1.0.0-RELEASE"
+        artifact_format: "jar"
+        source: "/tmp/artifact.jar"
+        operation: "PUT"
+        repository: "maven-releases"
+      ignore_errors: true
+ 
