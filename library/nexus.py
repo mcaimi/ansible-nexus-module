@@ -55,6 +55,16 @@ EXAMPLES = r'''
       artifact_id: "org.redhat:demo-app:1.1.0-SNAPSHOT"
       repository: "maven-snapshots"
       target: "/tmp/demoapp.jar"
+
+- name: Upload an artifact to Nexus
+      username: test@redhat.com
+      pass: redhat123
+      nexus_endpoint: "https://nexus.domain.tld"
+      artifact_id: "org.redhat:demo-app:1.1.0-RELEASE"
+      repository: "maven-releases"
+      operation: "PUT"
+      artifact_format: "JAR"
+      source: "/repo/artifact.jar"
 '''
 
 RETURN = r'''
@@ -69,7 +79,7 @@ from ansible.module_utils.basic import AnsibleModule
 from hashlib import sha1, md5
 import base64
 import os,re,sys,errno
-from urllib import request, error
+import requests
 from json import loads
 
 class MalformedArgumentException(Exception):
@@ -96,7 +106,12 @@ class FileCorruptedException(Exception):
     def __init__(self, *args, **kwargs):
         super().__init__(self, *args, **kwargs)
 
-NEXUS_REST_PATH = "service/rest/v1/search/assets"
+class AlreadyExistsException(Exception):
+    def __init__(self, *args, **kwargs):
+        super().__init__(self, *args, **kwargs)
+
+NEXUS_DOWNLOAD_PATH = "service/rest/v1/search/assets"
+NEXUS_UPLOAD_PATH = "service/rest/v1/components"
 MODULE_OPERATIONS = ["GET", "PUT"]
 SUPPORTED_FORMATS = ["WAR", "JAR"]
 
@@ -126,17 +141,9 @@ class NexusAdapter():
     def __init__(self, parameters):
         self.parm_hash = parameters
         self.base_url = "%s" % (self.parm_hash.nexus_url)
-        self.base_search_url = "%s/%s?sort=version" % (self.base_url, NEXUS_REST_PATH)
         self.md5computer = md5()
         self.sha1computer = sha1()
         self.HASH_BUFFER_SIZE = 64*1024
-
-    def build_search_parameters(self):
-        self.url_parameters = "&repository=%s&group=%s&name=%s&version=%s&maven.extension=%s&maven.classifier" % (self.parm_hash.repository,
-                                                                                                        self.parm_hash.artifact.groupID,
-                                                                                                        self.parm_hash.artifact.ID,
-                                                                                                        self.parm_hash.artifact.version,
-                                                                                                        self.parm_hash.artifact.format)
 
     def _compute_hashes(self, filename):
         with open(filename, 'rb') as descriptor:
@@ -149,57 +156,94 @@ class NexusAdapter():
 
         return ("{0}".format(self.md5computer.hexdigest()), "{0}".format(self.sha1computer.hexdigest()))
 
+    def push_artifact(self):
+        # requred api parameters
+        parameters = {
+            "repository": self.parm_hash.repository
+        }
+
+        # build upload endpoint
+        upload_endpoint = "/".join([self.base_url, NEXUS_UPLOAD_PATH])
+
+        # upload artifact
+        try:
+            with open(self.parm_hash.source, 'rb') as fd:
+                files = {
+                    'maven2.groupId': (None, self.parm_hash.artifact.groupID),
+                    'maven2.artifactId': (None, self.parm_hash.artifact.ID),
+                    'maven2.version': (None, self.parm_hash.artifact.version),
+                    'maven2.asset1': (self.parm_hash.artifact.ID, fd),
+                    'maven2.asset1.extension': (None, self.parm_hash.artifact.format),
+                }
+                self.upload_response = requests.post(url=upload_endpoint,
+                                        files=files,
+                                        params=parameters,
+                                        auth=(self.parm_hash.username, self.parm_hash.password))
+
+            # handle errors
+            if (self.upload_response.status_code == 403):
+                raise PermissionError("Insufficient Permissions for Artifact Upload.")
+            elif (self.upload_response.status_code == 422):
+                raise MalformedArgumentException("Parameter 'repository' is mandatory")
+        except Exception as e:
+            raise Exception(e.__str__())
+
+        return { 'message': "Artifact %s uploaded, status_code %d" % (self.parm_hash.source, self.upload_response.status_code) }
+
     def pull_artifact(self):
-        url_to_get = "%s%s" % (self.base_search_url, self.url_parameters)
+        self.base_search_url = "/".join([self.base_url, NEXUS_DOWNLOAD_PATH])
 
-        auth_hash = base64.b64encode(bytes("%s:%s" % (self.parm_hash.username, self.parm_hash.password), 'ascii'))
+        # search parameters
+        search_params = {
+            'sort': 'version',
+            'repository': self.parm_hash.repository,
+            'group': self.parm_hash.artifact.groupID,
+            'name': self.parm_hash.artifact.ID,
+            'version': self.parm_hash.artifact.version,
+            'maven.extension': self.parm_hash.artifact.format,
+            'maven.classifier': None
+        }
 
-        http_request_object = request.Request(url_to_get)
-        http_request_object.add_header('Authorization', 'Basic %s' % auth_hash.decode())
-        try: 
-            self.search_results = request.urlopen(http_request_object)
+        try:
+            self.search_results = requests.get(url=self.base_search_url,
+                                            auth=(self.parm_hash.username, self.parm_hash.password),
+                                            params=search_params)
 
-            if self.search_results.code == 200:
-                content = Wrapper(loads(self.search_results.read().decode()))
+            if self.search_results.status_code == 200:
+                content = Wrapper(loads(self.search_results.text))
 
                 if not len(content.items) > 0:
-                    raise FetchError("Artifact Not Found") 
+                    raise FetchError("Artifact Not Found")
 
                 downloadUrl = content.items[0].downloadUrl
                 shaDigest = content.items[0].checksum.sha1
                 md5Digest = content.items[0].checksum.md5
 
                 # download artifact...
-                download_request = request.Request(downloadUrl)
-                download_request.add_header('Authorization', 'Basic %s' % auth_hash.decode())
-                download_object = request.urlopen(download_request)
-                download_info = download_object.info()
+                download_request = requests.get(downloadUrl, auth=(self.parm_hash.username, self.parm_hash.password))
 
                 out_file = self.parm_hash.deploy_dir
                 with open(out_file, "wb") as descriptor:
-                    file_size = int(download_info["Content-Length"])
+                    file_size = int(download_request.headers.get("Content-Length"))
 
                     downloaded_so_far = 0
                     tx_size = 8192
-                    while True:
-                        buffer = download_object.read(tx_size)
-                        if not buffer:
-                            # no more bytes in stream
-                            break
-
-                        downloaded_so_far += len(buffer)
-                        descriptor.write(buffer)
+                    for chunk in download_request.iter_content(chunk_size=tx_size):
+                        downloaded_so_far += len(chunk)
+                        descriptor.write(chunk)
 
                 md5Hash, sha1Hash = self._compute_hashes(out_file)
 
                 if not all([md5Digest == md5Hash, shaDigest == sha1Hash]):
                     raise FileCorruptedException("Hashes do not match for downloaded artifact")
+                if not downloaded_so_far == file_size:
+                    raise FileCorruptedException("Downloaded file size does not match content-length")
                 else:
                     return { "message": "Hashes match: download is OK" }
 
             else:
                 raise FetchError("Got HTTP code %s" % self.search_results.code)
-        except error.HTTPError as url_exception:
+        except Exception as url_exception:
             raise FetchError(url_exception.__str__())
 
 # module handler function
@@ -234,7 +278,7 @@ def nexus_module():
     # results dict
     res_args = dict(
         changed = False,
-        message = "OK"
+        message = "Undefined"
     )
 
     if not (artifact_format.upper() in SUPPORTED_FORMATS):
@@ -280,6 +324,7 @@ def nexus_module():
                 if makedir_exception.errno == errno.EEXIST and os.path.isdir(target_dir):
                     pass
                 else:
+                    res_args['message'] = "KO"
                     nexus_module_instance.fail_json(msg=str(makedir_exception), **res_args)
 
         parameter_hash['artifact'] = artifact
@@ -290,13 +335,35 @@ def nexus_module():
 
         # get the artifact
         try:
-            nexus_adapter.build_search_parameters()
             res_args['message'] = nexus_adapter.pull_artifact().get('message')
             res_args['changed'] = True
         except FetchError as fe:
+            res_args['message'] = "KO"
             nexus_module_instance.fail_json(msg=str(fe), **res_args)
         except FileCorruptedException as fce:
+            res_args['message'] = "KO"
             nexus_module_instance.fail_json(msg=str(fce), **res_args)
+    elif (operation == "PUT"):
+        # check whether source file exists
+        if not os.path.isfile(source):
+            nexus_module_instance.fail_json(msg="Source file %s does not exist" % source, **res_args)
+
+        parameter_hash['source'] = source
+        parameter_hash['artifact'] = artifact
+
+        try:
+            nexus_adapter = NexusAdapter(Wrapper(parameter_hash))
+            res_args['message'] = nexus_adapter.push_artifact().get('message')
+            res_args['changed'] = True
+        except PermissionError as pe:
+            res_args['message'] = "PermissionError"
+            nexus_module_instance.fail_json(msg=str(pe), **res_args)
+        except MalformedArgumentException as me:
+            res_args['message'] = "Malformed Input: missing required parameter"
+            nexus_module_instance.fail_json(msg=str(me), **res_args)
+        except Exception as e:
+            res_args['message'] = "KO"
+            nexus_module_instance.fail_json(msg=str(e), **res_args)
     else:
         pass
 
